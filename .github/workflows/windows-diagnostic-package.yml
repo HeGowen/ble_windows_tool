@@ -1,0 +1,60 @@
+name: windows-diagnostic-package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish win-x64 single file
+        shell: pwsh
+        run: |
+          dotnet restore .\\src\\BleWindowsTool\\BleWindowsTool.csproj
+          dotnet publish .\\src\\BleWindowsTool\\BleWindowsTool.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:DebugType=none -o .\\dist
+
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .\\release | Out-Null
+          Copy-Item .\\dist\\ble_windows_tool.exe .\\release\\ble_windows_tool.exe -Force
+          Copy-Item .\\run_ble_windows_tool.bat .\\release\\run_ble_windows_tool.bat -Force
+          New-Item -ItemType Directory -Force -Path .\\release\\config | Out-Null
+          Copy-Item .\\config\\box_diag_config.json .\\release\\config\\box_diag_config.json -Force
+          Copy-Item .\\README.md .\\release\\README.md -Force
+          "build_time_utc=$(Get-Date -AsUTC -Format o)" | Out-File .\\release\\build_info.txt -Encoding utf8
+          "run_number=${{ github.run_number }}" | Add-Content .\\release\\build_info.txt
+          Compress-Archive -Path .\\release\\* -DestinationPath .\\ble_windows_tool-win-x64.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ble_windows_tool-win-x64
+          path: .\\ble_windows_tool-win-x64.zip
+
+      - name: Publish rolling latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: BLE Windows Tool Latest
+          make_latest: true
+          body: |
+            Auto-built BLE diagnostic tool for DreamPod charging box.
+            Includes one-click runner and default config.
+          files: |
+            ./ble_windows_tool-win-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
