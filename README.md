@@ -1,8 +1,8 @@
-# BLE Windows Diagnostic Tool (DreamPod Box)
+# BLE Windows Diagnostic Tool (DreamPod Box + Radar)
 
-这是一个**独立**的 Windows 诊断工具仓库，只用于定位“为什么充电盒在 Windows 上扫描/连接/收包失败”。
+这是一个**独立**的 Windows 诊断工具仓库，用于定位“为什么充电盒/雷达在 Windows 上扫描、连接、收包失败”。
 
-它不会修改你当前 `dreamPod` 主项目，也不会依赖 Node-RED、MQTT、雷达桥。
+它不会修改你当前 `dreamPod` 主项目，也不会依赖 Node-RED、MQTT。
 
 ## 1. 这个工具做了什么
 
@@ -29,6 +29,14 @@
 - 发送 `sync_time`、`connect_all`、`collect_all`
 - 解析 frame/STLD/TLD
 - 记录功能码计数、数据类型计数、状态包内容
+- 统计每类数据帧数量：`eeg/ecg/o2/audio`（以及状态类）
+- 按时间间隔抽样打印少量值（便于快速判断是否在持续收数）
+
+5. （可选）雷达诊断
+- 扫描并选择雷达目标（默认名称包含 `MDSK-MWR`）
+- 建立连接后发送 `sync_time` + collect 开关
+- 解析毫米波 `0x2180` 数据，记录 I/Q 对数量
+- 按时间间隔抽样打印 I/Q 头部值
 
 ## 2. 一键运行（推荐）
 
@@ -59,11 +67,24 @@
 - `scan_attempts.log`
   - 每次扫描到的设备清单、打分、选择依据
 
+- `radar_scan_attempts.log`
+  - 雷达扫描清单、打分、选择依据
+
 - `packets.log`
-  - 收到的数据帧概要（功能码、数据类型、状态字段）
+  - 盒子数据帧概要（功能码、数据类型、状态字段）
+
+- `radar_packets.log`
+  - 雷达数据帧概要（I/Q 对数量、抽样值）
 
 - `summary.json`
-  - 本次会话统计（连接次数、断开次数、通知数、帧数、最后错误）
+  - 本次总览（盒子摘要 + 雷达摘要 + 状态）
+
+- `summary_box.json`
+  - 盒子会话统计（连接次数、断开次数、通知数、帧数、最后错误）
+  - `CategoryCounts`：每类数据帧统计（eeg/ecg/o2/audio 及状态类）
+
+- `summary_radar.json`
+  - 雷达会话统计（连接次数、断开次数、通知数、帧数、I/Q 对数量、最后错误）
 
 - `effective_config.json`
   - 本次实际生效配置（用于复现）
@@ -86,6 +107,11 @@
 - `diag.session_seconds`: 收包会话时长
 - `diag.max_connect_attempts`: 连接重试次数
 - `diag.dump_raw_hex`: 是否记录原始通知 hex（默认 false）
+
+- `radar.enabled`: 是否启用雷达诊断（默认 true）
+- `radar.target_name_contains`: 默认 `MDSK-MWR`
+- `radar.target_address`: 可空；填后优先按地址选雷达
+- `radar.allow_addresses`: 雷达地址白名单
 
 ## 5. 命令行参数（可选）
 
@@ -124,6 +150,8 @@ dotnet publish .\src\BleWindowsTool\BleWindowsTool.csproj -c Release -r win-x64 
 - `scan_attempts.log`
 - `packets.log`
 - `summary.json`
+- `summary_box.json`
+- `summary_radar.json`（若启用雷达）
 
 ## 8. 回退基线
 

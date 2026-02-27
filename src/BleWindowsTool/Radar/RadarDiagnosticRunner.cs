@@ -8,9 +8,9 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
-namespace BleWindowsTool.Box;
+namespace BleWindowsTool.Radar;
 
-public sealed class BoxDiagnosticSummary
+public sealed class RadarDiagnosticSummary
 {
     public required string StartedAt { get; init; }
     public string EndedAt { get; set; } = string.Empty;
@@ -21,37 +21,30 @@ public sealed class BoxDiagnosticSummary
     public int SessionDisconnected { get; set; }
     public int TotalNotifications { get; set; }
     public int TotalFrames { get; set; }
+    public int MmwaveFrames { get; set; }
+    public int IqPairs { get; set; }
     public Dictionary<string, int> FuncCounts { get; } = new();
     public Dictionary<string, int> DataTypeCounts { get; } = new();
-    public Dictionary<string, int> CategoryCounts { get; } = new();
     public string LastError { get; set; } = "none";
     public string LastDataAt { get; set; } = "n/a";
 }
 
-internal sealed class AddressCandidate
+internal sealed class RadarAddressCandidate
 {
     public required ulong Address { get; init; }
     public required string AddressText { get; init; }
     public required string Reason { get; init; }
 }
 
-public sealed class BoxDiagnosticRunner : IDisposable
+public sealed class RadarDiagnosticRunner : IDisposable
 {
-    private const ushort FuncConnectAll = 0x0011;
-    private const ushort FuncCollectAll = 0x0012;
+    private const ushort FuncCollectSwitch = 0x0011;
     private const ushort FuncSyncTime = 0x0080;
-    private const ushort FuncDataUpload = 0x8000;
-    private const ushort FuncStatusReport = 0x8001;
+    private const ushort DataUploadCode = 0x8000;
+    private const ushort StatusReportCode = 0x8001;
+    private const ushort MmwaveType = 0x2180;
 
-    private const ushort EegType = 0x2010;
-    private const ushort EcgType = 0x2020;
-    private const ushort O2Type = 0x2030;
-    private const ushort AudioOpusType = 0x2000;
-    private const ushort AudioSnoreType = 0x2100;
-    private const ushort AudioSnoreTypeB = 0x2133;
-    private const ushort AudioStatusType = 0x2130;
-
-    private readonly BoxConfig _box;
+    private readonly RadarConfig _radar;
     private readonly DiagConfig _diag;
     private readonly DiagLogger _logger;
     private readonly object _packetLock = new();
@@ -61,17 +54,18 @@ public sealed class BoxDiagnosticRunner : IDisposable
     private readonly FrameStreamParser _parser = new();
     private readonly ConcurrentDictionary<string, int> _funcCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, int> _typeCounts = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, int> _categoryCounts = new(StringComparer.OrdinalIgnoreCase);
-    private readonly object _sampleLogLock = new();
-    private readonly Dictionary<string, DateTimeOffset> _lastSampleLoggedAt = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _sampleLock = new();
 
     private int _notifyCount;
     private int _frameCount;
+    private int _mmwaveFrameCount;
+    private int _iqPairCount;
     private DateTimeOffset _lastDataAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastSampleLogAt = DateTimeOffset.MinValue;
 
-    public BoxDiagnosticRunner(BoxConfig box, DiagConfig diag, DiagLogger logger, string packetLogPath)
+    public RadarDiagnosticRunner(RadarConfig radar, DiagConfig diag, DiagLogger logger, string packetLogPath)
     {
-        _box = box;
+        _radar = radar;
         _diag = diag;
         _logger = logger;
         Directory.CreateDirectory(Path.GetDirectoryName(packetLogPath)!);
@@ -81,9 +75,9 @@ public sealed class BoxDiagnosticRunner : IDisposable
         };
     }
 
-    public async Task<BoxDiagnosticSummary> RunAsync(BleScanDevice selected, CancellationToken cancellationToken)
+    public async Task<RadarDiagnosticSummary> RunAsync(BleScanDevice selected, CancellationToken cancellationToken)
     {
-        var summary = new BoxDiagnosticSummary
+        var summary = new RadarDiagnosticSummary
         {
             StartedAt = DateTimeOffset.Now.ToString("O"),
             SelectedName = selected.Name,
@@ -122,6 +116,8 @@ public sealed class BoxDiagnosticRunner : IDisposable
 
         summary.TotalNotifications = _notifyCount;
         summary.TotalFrames = _frameCount;
+        summary.MmwaveFrames = _mmwaveFrameCount;
+        summary.IqPairs = _iqPairCount;
         summary.LastDataAt = _lastDataAt == DateTimeOffset.MinValue ? "n/a" : _lastDataAt.ToString("O");
         foreach (var kv in _funcCounts.OrderBy(k => k.Key))
         {
@@ -131,11 +127,6 @@ public sealed class BoxDiagnosticRunner : IDisposable
         foreach (var kv in _typeCounts.OrderBy(k => k.Key))
         {
             summary.DataTypeCounts[kv.Key] = kv.Value;
-        }
-
-        foreach (var kv in _categoryCounts.OrderBy(k => k.Key))
-        {
-            summary.CategoryCounts[kv.Key] = kv.Value;
         }
 
         summary.EndedAt = DateTimeOffset.Now.ToString("O");
@@ -161,18 +152,18 @@ public sealed class BoxDiagnosticRunner : IDisposable
         var maxConnectAttempts = Math.Max(1, _diag.MaxConnectAttempts);
         var openTimeout = TimeSpan.FromSeconds(Math.Max(3, _diag.DeviceOpenTimeoutSeconds));
         var gattTimeout = TimeSpan.FromSeconds(Math.Max(4, _diag.GattTimeoutSeconds));
-        var serviceGuid = Guid.Parse(_box.ServiceUuid);
-        var rxGuid = Guid.Parse(_box.RxCharUuid);
-        var txGuid = Guid.Parse(_box.TxCharUuid);
+        var serviceGuid = Guid.Parse(_radar.ServiceUuid);
+        var rxGuid = Guid.Parse(_radar.RxCharUuid);
+        var txGuid = Guid.Parse(_radar.TxCharUuid);
 
         var addressCandidates = BuildAddressCandidates(selected);
-        _logger.Info($"session connect candidates: {string.Join(", ", addressCandidates.Select(x => $"{x.AddressText}({x.Reason})"))}");
+        _logger.Info($"[RADAR] session connect candidates: {string.Join(", ", addressCandidates.Select(x => $"{x.AddressText}({x.Reason})"))}");
 
         for (var attempt = 1; attempt <= maxConnectAttempts && !outerToken.IsCancellationRequested; attempt++)
         {
             foreach (var candidate in addressCandidates)
             {
-                _logger.Info($"connecting {candidate.AddressText} attempt={attempt}/{maxConnectAttempts} source={candidate.Reason}");
+                _logger.Info($"[RADAR] connecting {candidate.AddressText} attempt={attempt}/{maxConnectAttempts} source={candidate.Reason}");
                 var openRes = await TryWithTimeoutAsync(
                     () => BluetoothLEDevice.FromBluetoothAddressAsync(candidate.Address).AsTask(),
                     openTimeout,
@@ -185,14 +176,13 @@ public sealed class BoxDiagnosticRunner : IDisposable
                 }
 
                 device = openRes.Value;
-                _logger.Info($"device open status addr={candidate.AddressText} state={device.ConnectionStatus}");
-
+                _logger.Info($"[RADAR] device open status addr={candidate.AddressText} state={device.ConnectionStatus}");
                 await Task.Delay(TimeSpan.FromMilliseconds(220), outerToken);
 
                 service = await FindServiceAsync(device, serviceGuid, gattTimeout, outerToken);
                 if (service == null)
                 {
-                    _logger.Warn($"service not found addr={candidate.AddressText}");
+                    _logger.Warn($"[RADAR] service not found addr={candidate.AddressText}");
                     TryDispose(device);
                     device = null;
                     continue;
@@ -202,7 +192,7 @@ public sealed class BoxDiagnosticRunner : IDisposable
                 txChar = await FindCharacteristicAsync(device, service, txGuid, gattTimeout, outerToken);
                 if (rxChar == null || txChar == null)
                 {
-                    _logger.Warn($"characteristics not found addr={candidate.AddressText}");
+                    _logger.Warn($"[RADAR] characteristics not found addr={candidate.AddressText}");
                     TryDispose(service);
                     TryDispose(device);
                     service = null;
@@ -212,7 +202,7 @@ public sealed class BoxDiagnosticRunner : IDisposable
                     continue;
                 }
 
-                _logger.Info($"connect path selected addr={candidate.AddressText} source={candidate.Reason}");
+                _logger.Info($"[RADAR] connect path selected addr={candidate.AddressText} source={candidate.Reason}");
                 break;
             }
 
@@ -256,7 +246,7 @@ public sealed class BoxDiagnosticRunner : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.Warn($"notify parse error: {ex.Message}");
+                    _logger.Warn($"[RADAR] notify parse error: {ex.Message}");
                 }
             }
 
@@ -275,10 +265,9 @@ public sealed class BoxDiagnosticRunner : IDisposable
                 return (false, false, $"enable_notify_failed:{(notifyRes.Success ? notifyRes.Value : "timeout")}");
             }
 
-            _logger.Info("connected and notifications enabled");
+            _logger.Info("[RADAR] connected and notifications enabled");
             await SendCommandAsync(rxChar, FuncSyncTime, BuildTimestampPayload(), gattTimeout, outerToken);
-            await SendCommandAsync(rxChar, FuncConnectAll, [1], gattTimeout, outerToken);
-            await SendCommandAsync(rxChar, FuncCollectAll, BuildCollectPayload(true), gattTimeout, outerToken);
+            await SendCommandAsync(rxChar, FuncCollectSwitch, BuildCollectPayload(true), gattTimeout, outerToken);
 
             sessionCts = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
             keepaliveTask = RunKeepAliveLoopAsync(rxChar, gattTimeout, sessionCts.Token);
@@ -290,11 +279,11 @@ public sealed class BoxDiagnosticRunner : IDisposable
 
             if (disconnected)
             {
-                _logger.Warn("session disconnected by BLE stack");
+                _logger.Warn("[RADAR] session disconnected by BLE stack");
             }
             else
             {
-                _logger.Info("session completed by timeout window");
+                _logger.Info("[RADAR] session completed by timeout window");
             }
 
             return (true, disconnected, disconnected ? "disconnected" : string.Empty);
@@ -341,9 +330,9 @@ public sealed class BoxDiagnosticRunner : IDisposable
         }
     }
 
-    private List<AddressCandidate> BuildAddressCandidates(BleScanDevice selected)
+    private List<RadarAddressCandidate> BuildAddressCandidates(BleScanDevice selected)
     {
-        var map = new Dictionary<string, AddressCandidate>(StringComparer.OrdinalIgnoreCase);
+        var map = new Dictionary<string, RadarAddressCandidate>(StringComparer.OrdinalIgnoreCase);
 
         void Add(string raw, string reason)
         {
@@ -355,7 +344,7 @@ public sealed class BoxDiagnosticRunner : IDisposable
             var text = BleScanner.ToMacAddress(parsed);
             if (!map.ContainsKey(text))
             {
-                map[text] = new AddressCandidate
+                map[text] = new RadarAddressCandidate
                 {
                     Address = parsed,
                     AddressText = text,
@@ -367,8 +356,8 @@ public sealed class BoxDiagnosticRunner : IDisposable
         Add(selected.Address, "scan_addr");
         var identity = BleDeviceIntrospection.Inspect(selected);
         Add(identity.ManufacturerMac, "mdsk_mfg_mac");
-        Add(_box.TargetAddress, "config_target");
-        foreach (var addr in _box.AllowAddresses)
+        Add(_radar.TargetAddress, "config_target");
+        foreach (var addr in _radar.AllowAddresses)
         {
             Add(addr, "allow");
         }
@@ -381,8 +370,8 @@ public sealed class BoxDiagnosticRunner : IDisposable
         while (!ct.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(Math.Max(2, _diag.KeepaliveCollectSeconds)), ct);
-            await SendCommandAsync(rxChar, FuncCollectAll, BuildCollectPayload(true), timeout, ct);
-            _logger.Info("keepalive collect sent");
+            await SendCommandAsync(rxChar, FuncCollectSwitch, BuildCollectPayload(true), timeout, ct);
+            _logger.Info("[RADAR] keepalive collect sent");
         }
     }
 
@@ -397,77 +386,61 @@ public sealed class BoxDiagnosticRunner : IDisposable
             WritePacketLine($"raw_notify len={rawNotifyChunk.Length} hex={Convert.ToHexString(rawNotifyChunk)}");
         }
 
-        if (frame.FunctionCode == FuncDataUpload)
+        if (frame.FunctionCode == DataUploadCode)
         {
             var stld = FrameCodec.ParseStld(frame.Payload);
             foreach (var item in stld)
             {
                 AddCount(_typeCounts, $"0x{item.Type:X4}");
-                var hint = item.Type switch
+                if (item.Type != MmwaveType || item.Data.Length < 160)
                 {
-                    EegType => $"eeg bytes={item.Data.Length}",
-                    EcgType => $"ecg bytes={item.Data.Length}",
-                    O2Type => $"o2 bytes={item.Data.Length}",
-                    AudioOpusType => $"audio_opus bytes={item.Data.Length}",
-                    AudioSnoreType => $"audio_snore bytes={item.Data.Length}",
-                    AudioSnoreTypeB => $"audio_snore_b bytes={item.Data.Length}",
-                    _ => $"type=0x{item.Type:X4} bytes={item.Data.Length}"
-                };
-                WritePacketLine($"frame=0x{frame.FunctionCode:X4} seq={item.Sequence} {hint}");
+                    WritePacketLine($"frame=0x{frame.FunctionCode:X4} seq={item.Sequence} type=0x{item.Type:X4} bytes={item.Data.Length}");
+                    continue;
+                }
 
-                switch (item.Type)
+                Interlocked.Increment(ref _mmwaveFrameCount);
+                var iVals = new List<uint>(20);
+                var qVals = new List<uint>(20);
+                for (var i = 0; i < 80; i += 4)
                 {
-                    case EegType:
-                        AddCount(_categoryCounts, "eeg");
-                        TryLogBoxSample("eeg", BuildEegSampleText(item.Data), TimeSpan.FromSeconds(12));
-                        break;
-                    case EcgType:
-                        AddCount(_categoryCounts, "ecg");
-                        TryLogBoxSample("ecg", BuildEcgSampleText(item.Data), TimeSpan.FromSeconds(12));
-                        break;
-                    case O2Type:
-                        AddCount(_categoryCounts, "o2");
-                        TryLogBoxSample("o2", BuildO2SampleText(item.Data), TimeSpan.FromSeconds(8));
-                        break;
-                    case AudioOpusType:
-                    case AudioSnoreType:
-                    case AudioSnoreTypeB:
-                        AddCount(_categoryCounts, "audio");
-                        TryLogBoxSample("audio", BuildAudioSampleText(item.Type, item.Data), TimeSpan.FromSeconds(15));
-                        break;
+                    iVals.Add(BitConverter.ToUInt32(item.Data, i));
+                }
+
+                for (var i = 80; i < 160; i += 4)
+                {
+                    qVals.Add(BitConverter.ToUInt32(item.Data, i));
+                }
+
+                var pairCount = Math.Min(iVals.Count, qVals.Count);
+                Interlocked.Add(ref _iqPairCount, pairCount);
+                WritePacketLine($"frame=0x{frame.FunctionCode:X4} seq={item.Sequence} radar_iq_pairs={pairCount} i0={(pairCount > 0 ? iVals[0] : 0)} q0={(pairCount > 0 ? qVals[0] : 0)}");
+
+                var now = DateTimeOffset.Now;
+                var shouldLog = false;
+                lock (_sampleLock)
+                {
+                    if (_lastSampleLogAt == DateTimeOffset.MinValue || now - _lastSampleLogAt >= TimeSpan.FromSeconds(12))
+                    {
+                        _lastSampleLogAt = now;
+                        shouldLog = true;
+                    }
+                }
+
+                if (shouldLog)
+                {
+                    var iHead = string.Join(",", iVals.Take(3));
+                    var qHead = string.Join(",", qVals.Take(3));
+                    _logger.Info($"[RADAR] sample[iq] I=[{iHead}] Q=[{qHead}] pairs={pairCount}");
                 }
             }
         }
-        else if (frame.FunctionCode == FuncStatusReport)
+        else if (frame.FunctionCode == StatusReportCode)
         {
             var tld = FrameCodec.ParseTld(frame.Payload);
             foreach (var item in tld)
             {
                 AddCount(_typeCounts, $"status_0x{item.Type:X4}");
-                var detail = item.Type switch
-                {
-                    EegType when item.Data.Length >= 3 => $"eeg_status ble={item.Data[0]} battery={item.Data[1]} loff={item.Data[2]}",
-                    EcgType when item.Data.Length >= 3 => $"ecg_status ble={item.Data[0]} battery={item.Data[1]} loff={item.Data[2]}",
-                    O2Type when item.Data.Length >= 3 => $"o2_status ble={item.Data[0]} battery={item.Data[1]} wear={item.Data[2]}",
-                    AudioStatusType when item.Data.Length >= 2 => $"audio_status ble={item.Data[0]} battery={item.Data[1]}",
-                    _ => $"status_type=0x{item.Type:X4} bytes={item.Data.Length}"
-                };
-                WritePacketLine($"frame=0x{frame.FunctionCode:X4} {detail}");
-                switch (item.Type)
-                {
-                    case EegType:
-                        AddCount(_categoryCounts, "eeg_status");
-                        break;
-                    case EcgType:
-                        AddCount(_categoryCounts, "ecg_status");
-                        break;
-                    case O2Type:
-                        AddCount(_categoryCounts, "o2_status");
-                        break;
-                    case AudioStatusType:
-                        AddCount(_categoryCounts, "audio_status");
-                        break;
-                }
+                WritePacketLine($"frame=0x{frame.FunctionCode:X4} status_type=0x{item.Type:X4} bytes={item.Data.Length}");
             }
         }
         else
@@ -478,71 +451,8 @@ public sealed class BoxDiagnosticRunner : IDisposable
         var currentFrames = Volatile.Read(ref _frameCount);
         if (currentFrames % 20 == 0)
         {
-            _logger.Info($"data heartbeat notifications={_notifyCount} frames={currentFrames}");
+            _logger.Info($"[RADAR] data heartbeat notifications={_notifyCount} frames={currentFrames} mmwave_frames={_mmwaveFrameCount} iq_pairs={_iqPairCount}");
         }
-    }
-
-    private void TryLogBoxSample(string category, string sample, TimeSpan minInterval)
-    {
-        if (string.IsNullOrWhiteSpace(sample))
-        {
-            return;
-        }
-
-        var now = DateTimeOffset.Now;
-        lock (_sampleLogLock)
-        {
-            if (_lastSampleLoggedAt.TryGetValue(category, out var last) && now - last < minInterval)
-            {
-                return;
-            }
-
-            _lastSampleLoggedAt[category] = now;
-        }
-
-        _logger.Info($"sample[{category}] {sample}");
-    }
-
-    private static string BuildEegSampleText(byte[] data)
-    {
-        if (data.Length < 3)
-        {
-            return $"bytes={data.Length}";
-        }
-
-        var ch1 = BitConverter.ToInt16(data, 1);
-        var ch2 = data.Length >= 59 ? BitConverter.ToInt16(data, 57) : ch1;
-        return $"raw_ch1={ch1} raw_ch2={ch2} loff={data[0]} bytes={data.Length}";
-    }
-
-    private static string BuildEcgSampleText(byte[] data)
-    {
-        if (data.Length < 1 + 6)
-        {
-            return $"bytes={data.Length}";
-        }
-
-        var v0 = BitConverter.ToInt16(data, 1);
-        var v1 = BitConverter.ToInt16(data, 3);
-        var v2 = BitConverter.ToInt16(data, 5);
-        return $"raw=[{v0},{v1},{v2}] loff={data[0]} bytes={data.Length}";
-    }
-
-    private static string BuildO2SampleText(byte[] data)
-    {
-        if (data.Length < 3)
-        {
-            return $"bytes={data.Length}";
-        }
-
-        return $"hr={data[0]} spo2={data[1]} wear={data[2]}";
-    }
-
-    private static string BuildAudioSampleText(ushort type, byte[] data)
-    {
-        var take = Math.Min(6, data.Length);
-        var head = string.Join(",", data.Take(take));
-        return $"type=0x{type:X4} bytes={data.Length} head=[{head}]";
     }
 
     private async Task SendCommandAsync(
@@ -574,7 +484,7 @@ public sealed class BoxDiagnosticRunner : IDisposable
 
                 if (!w2.Success || w2.Value != GattCommunicationStatus.Success)
                 {
-                    _logger.Warn($"write failed func=0x{functionCode:X4} status={(w2.Success ? w2.Value : "timeout")}");
+                    _logger.Warn($"[RADAR] write failed func=0x{functionCode:X4} status={(w2.Success ? w2.Value : "timeout")}");
                 }
             }
         }
@@ -600,7 +510,7 @@ public sealed class BoxDiagnosticRunner : IDisposable
 
             if (result.Value.Status != GattCommunicationStatus.Success)
             {
-                _logger.Warn($"GetGattServicesForUuid status={result.Value.Status} mode={mode}");
+                _logger.Warn($"[RADAR] GetGattServicesForUuid status={result.Value.Status} mode={mode}");
                 continue;
             }
 
@@ -629,7 +539,7 @@ public sealed class BoxDiagnosticRunner : IDisposable
 
             if (result.Value.Status != GattCommunicationStatus.Success)
             {
-                _logger.Warn($"GetCharacteristicsForUuid status={result.Value.Status} mode={mode}");
+                _logger.Warn($"[RADAR] GetCharacteristicsForUuid status={result.Value.Status} mode={mode}");
                 continue;
             }
 
@@ -639,52 +549,19 @@ public sealed class BoxDiagnosticRunner : IDisposable
             }
         }
 
-        foreach (var mode in new[] { BluetoothCacheMode.Uncached, BluetoothCacheMode.Cached })
-        {
-            var allServices = await TryWithTimeoutAsync(
-                () => device.GetGattServicesAsync(mode).AsTask(),
-                timeout,
-                ct);
-
-            if (!allServices.Success || allServices.Value == null || allServices.Value.Status != GattCommunicationStatus.Success)
-            {
-                continue;
-            }
-
-            foreach (var svc in allServices.Value.Services)
-            {
-                var chars = await TryWithTimeoutAsync(
-                    () => svc.GetCharacteristicsForUuidAsync(charGuid, mode).AsTask(),
-                    timeout,
-                    ct);
-
-                if (!chars.Success || chars.Value == null || chars.Value.Status != GattCommunicationStatus.Success)
-                {
-                    continue;
-                }
-
-                if (chars.Value.Characteristics.Count > 0)
-                {
-                    return chars.Value.Characteristics[0];
-                }
-            }
-        }
-
         return null;
     }
 
-    private static byte[] BuildCollectPayload(bool enable, long timestamp = 0)
+    private static byte[] BuildCollectPayload(bool enable)
     {
         var payload = new byte[9];
         payload[0] = enable ? (byte)1 : (byte)0;
-        BitConverter.GetBytes(timestamp).CopyTo(payload, 1);
         return payload;
     }
 
-    private static byte[] BuildTimestampPayload(long? timestamp = null)
+    private static byte[] BuildTimestampPayload()
     {
-        var ts = timestamp ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        return BitConverter.GetBytes(ts);
+        return BitConverter.GetBytes(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
     }
 
     private void AddCount(ConcurrentDictionary<string, int> map, string key)
@@ -727,9 +604,6 @@ public sealed class BoxDiagnosticRunner : IDisposable
     public void Dispose()
     {
         _writeLock.Dispose();
-        lock (_packetLock)
-        {
-            _packetWriter.Dispose();
-        }
+        _packetWriter.Dispose();
     }
 }

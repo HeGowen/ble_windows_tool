@@ -9,6 +9,9 @@ public sealed class AppConfig
     [JsonPropertyName("box")]
     public BoxConfig Box { get; set; } = new();
 
+    [JsonPropertyName("radar")]
+    public RadarConfig Radar { get; set; } = new();
+
     [JsonPropertyName("diag")]
     public DiagConfig Diag { get; set; } = new();
 
@@ -64,6 +67,30 @@ public sealed class BoxConfig
 {
     [JsonPropertyName("target_name_contains")]
     public string TargetNameContains { get; set; } = "MDSK-RELAY";
+
+    [JsonPropertyName("target_address")]
+    public string TargetAddress { get; set; } = string.Empty;
+
+    [JsonPropertyName("allow_addresses")]
+    public List<string> AllowAddresses { get; set; } = [];
+
+    [JsonPropertyName("service_uuid")]
+    public string ServiceUuid { get; set; } = "534b0001-b5a3-f393-e0a9-68716563686f";
+
+    [JsonPropertyName("rx_char_uuid")]
+    public string RxCharUuid { get; set; } = "534b0002-b5a3-f393-e0a9-68716563686f";
+
+    [JsonPropertyName("tx_char_uuid")]
+    public string TxCharUuid { get; set; } = "534b0003-b5a3-f393-e0a9-68716563686f";
+}
+
+public sealed class RadarConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; } = true;
+
+    [JsonPropertyName("target_name_contains")]
+    public string TargetNameContains { get; set; } = "MDSK-MWR";
 
     [JsonPropertyName("target_address")]
     public string TargetAddress { get; set; } = string.Empty;

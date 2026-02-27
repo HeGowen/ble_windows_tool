@@ -7,6 +7,15 @@
     "rx_char_uuid": "534b0002-b5a3-f393-e0a9-68716563686f",
     "tx_char_uuid": "534b0003-b5a3-f393-e0a9-68716563686f"
   },
+  "radar": {
+    "enabled": true,
+    "target_name_contains": "MDSK-MWR",
+    "target_address": "",
+    "allow_addresses": [],
+    "service_uuid": "534b0001-b5a3-f393-e0a9-68716563686f",
+    "rx_char_uuid": "534b0002-b5a3-f393-e0a9-68716563686f",
+    "tx_char_uuid": "534b0003-b5a3-f393-e0a9-68716563686f"
+  },
   "diag": {
     "scan_timeout_seconds": 6,
     "scan_attempts": 3,
