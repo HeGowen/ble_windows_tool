@@ -125,3 +125,10 @@ dotnet publish .\src\BleWindowsTool\BleWindowsTool.csproj -c Release -r win-x64 
 - `packets.log`
 - `summary.json`
 
+## 8. 回退基线
+
+已记录“盒子稳定连接”回退基线，请见：
+
+- `docs/回退基线_盒子稳定连接_20260227.md`
+
+后续新增雷达测试功能时，必须保证不影响该基线的盒子诊断能力。
